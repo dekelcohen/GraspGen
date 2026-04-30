@@ -28,7 +28,6 @@ import glob
 import os
 
 import numpy as np
-import torch
 import trimesh.transformations as tra
 
 from grasp_gen.grasp_server import GraspGenSampler, load_grasp_cfg
@@ -40,7 +39,6 @@ from grasp_gen.utils.viser_utils import (
 )
 from grasp_gen.utils.point_cloud_utils import (
     depth_and_segmentation_to_world_point_clouds,
-    point_cloud_outlier_removal,
 )
 
 
@@ -196,15 +194,15 @@ if __name__ == "__main__":
     pc_color = object_colors if object_colors is not None else [0, 200, 0]
     visualize_pointcloud(vis, "object_pc", pc_centered, pc_color, size=0.0025)
 
-    # Outlier removal
-    pc_filtered, pc_removed = point_cloud_outlier_removal(torch.from_numpy(pc_centered))
-    pc_filtered = pc_filtered.numpy()
-    pc_removed = pc_removed.numpy()
-    visualize_pointcloud(vis, "pc_removed", pc_removed, [255, 0, 0], size=0.003)
+    # Note: we skip the fixed-threshold (14mm) outlier removal used in demo_object_pc.py.
+    # That threshold is calibrated for small densely-scanned objects. For a large door surface
+    # from a 256x256 depth image at ~1.6m distance, the median inter-point distance is ~21mm,
+    # so the 14mm threshold would discard ~94% of valid surface points.
+    # The depth filter (max_linear_depth_m) already removes far-plane noise.
 
-    # Run inference. Outlier removal already applied above; skip it inside sample().
+    # Run inference. Skip internal outlier removal too (same fixed threshold).
     grasps_inferred, grasp_conf_inferred = GraspGenSampler.run_inference(
-        pc_filtered,
+        pc_centered,
         grasp_sampler,
         grasp_threshold=args.grasp_threshold,
         num_grasps=args.num_grasps,
