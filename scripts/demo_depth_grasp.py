@@ -9,7 +9,7 @@
 """
 Coding Agent doc : update here changes:
 Usage:
-python scripts/demo_depth_grasp.py --data_dir D:\NLP\Robotics\GraspModels\GraspGen\data\open_door_pybullet --gripper_config /data/repos/GraspGenModels/checkpoints/graspgen_franka_panda.yml
+python scripts/demo_depth_grasp.py --data_dir ./data/open_door_pybullet --gripper_config ../GraspGenModels/checkpoints/graspgen_franka_panda.yml
 
 
 Coding Agent change log : update here changes
