@@ -150,6 +150,20 @@ if __name__ == "__main__":
             "Ensure *_view_matrix.npy and *_projection_matrix.npy are present in data_dir."
         )
 
+    # Compute max linear depth to filter the object PC to the front-facing surface.
+    # The segmentation mask may cover a large object (e.g. an entire door panel).
+    # We keep only pixels whose camera-space linear depth is within
+    # DEPTH_MARGIN_M metres of the closest object pixel, ensuring the handle area
+    # is included while discarding background pixels at much larger depths.
+    DEPTH_MARGIN_M = 1.5
+    near_plane = float(projection_matrix[2, 3] / (projection_matrix[2, 2] - 1.0))
+    far_plane  = float(projection_matrix[2, 3] / (projection_matrix[2, 2] + 1.0))
+    ndc_z_obj = 2.0 * depth_raw[seg_mask == 1].astype(np.float64) - 1.0
+    lin_depth_obj = 2.0 * near_plane * far_plane / ((far_plane + near_plane) - ndc_z_obj * (far_plane - near_plane))
+    max_linear_depth_m = float(lin_depth_obj.min()) + DEPTH_MARGIN_M
+    print(f"Depth filter: near={near_plane:.3f}m  far={far_plane:.1f}m  "
+          f"min_obj_depth={lin_depth_obj.min():.3f}m  max_linear_depth={max_linear_depth_m:.3f}m")
+
     # Unproject depth + segmentation to world-frame point clouds using inv(VP).
     # This correctly handles raw OpenGL [0,1] depth buffer values and the
     # PyBullet/OpenGL camera convention (Z+ backward, Y+ up), avoiding the
@@ -161,6 +175,7 @@ if __name__ == "__main__":
         projection_matrix=projection_matrix,
         rgb_image=rgb_image,
         target_object_id=1,
+        max_linear_depth_m=max_linear_depth_m,
     )
     print(f"Object point cloud: {len(object_pc)} points (world frame)")
 
@@ -187,13 +202,14 @@ if __name__ == "__main__":
     pc_removed = pc_removed.numpy()
     visualize_pointcloud(vis, "pc_removed", pc_removed, [255, 0, 0], size=0.003)
 
-    # Run inference
+    # Run inference. Outlier removal already applied above; skip it inside sample().
     grasps_inferred, grasp_conf_inferred = GraspGenSampler.run_inference(
         pc_filtered,
         grasp_sampler,
         grasp_threshold=args.grasp_threshold,
         num_grasps=args.num_grasps,
         topk_num_grasps=args.topk_num_grasps,
+        remove_outliers=False,
     )
 
     if len(grasps_inferred) > 0:

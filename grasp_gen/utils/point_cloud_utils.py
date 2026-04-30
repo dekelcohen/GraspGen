@@ -314,6 +314,7 @@ def depth_and_segmentation_to_world_point_clouds(
     rgb_image: np.ndarray = None,
     target_object_id: int = 1,
     remove_object_from_scene: bool = False,
+    max_linear_depth_m: float = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Convert a raw OpenGL depth buffer and segmentation mask to world-frame point clouds
@@ -332,6 +333,10 @@ def depth_and_segmentation_to_world_point_clouds(
         rgb_image: HxWx3 uint8 RGB image (optional)
         target_object_id: label value in segmentation_mask for the target object
         remove_object_from_scene: if True, exclude object points from scene_pc
+        max_linear_depth_m: if set, discard pixels (for both scene and object) whose linearised
+            camera-space depth exceeds this value.  Useful when the segmentation mask covers a
+            large object (e.g. an entire door) and only the front-facing surface near the target
+            is relevant.  near/far clip planes are derived from the projection matrix.
 
     Returns:
         scene_pc: Nx3 world-frame point cloud (full scene, or scene minus object)
@@ -374,8 +379,22 @@ def depth_and_segmentation_to_world_point_clouds(
     world_pts = world_hom[:, :3] / world_hom[:, 3:4]               # (H*W, 3)
     world_pts = world_pts.reshape(H, W, 3)
 
-    # Valid mask: depth > 0 (skip empty / far-clipped pixels)
+    # Valid mask: depth > 0 (skip empty / far-clipped pixels); optionally cap by linear depth.
     valid_2d = depth_raw > 0
+    if max_linear_depth_m is not None:
+        # Extract near/far from the OpenGL projection matrix.
+        # P[2,2] = -(far+near)/(far-near),  P[2,3] = -2*far*near/(far-near)
+        near_plane = float(projection_matrix[2, 3] / (projection_matrix[2, 2] - 1.0))
+        far_plane  = float(projection_matrix[2, 3] / (projection_matrix[2, 2] + 1.0))
+        lin_depth = (2.0 * near_plane * far_plane
+                     / ((far_plane + near_plane) - ndc_z * (far_plane - near_plane)))
+        valid_2d = valid_2d & (lin_depth < max_linear_depth_m)
+        logger.info(
+            f"Depth filter: near={near_plane:.4f}m  far={far_plane:.1f}m  "
+            f"max_linear_depth={max_linear_depth_m:.2f}m  "
+            f"pixels retained: {valid_2d.sum()} / {depth_raw.size}"
+        )
+
     object_2d = (segmentation_mask == target_object_id) & valid_2d
 
     object_pc = world_pts[object_2d].astype(np.float32)
