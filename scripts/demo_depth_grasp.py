@@ -188,6 +188,8 @@ def grasps_to_world_frame(grasps_centered, pc_mean, view_matrix):
 
 if __name__ == "__main__":
     args = parse_args()
+    
+    CONVERT_TO_METER_DEPTH = False
 
     if not os.path.exists(args.gripper_config):
         raise ValueError(f"Gripper config {args.gripper_config} does not exist")
@@ -198,14 +200,17 @@ if __name__ == "__main__":
     # Load data
     depth_raw, seg_mask, rgb_image, view_matrix, projection_matrix = load_data(args.data_dir)
     image_height, image_width = depth_raw.shape[:2]
+    
+    if CONVERT_TO_METER_DEPTH:
+        # Derive near/far from projection matrix and convert depth to meters
+        near, far = derive_near_far_from_projection(projection_matrix)
+        print(f"Derived near={near:.4f}, far={far:.4f} from projection matrix")
 
-    # Derive near/far from projection matrix and convert depth to meters
-    near, far = derive_near_far_from_projection(projection_matrix)
-    print(f"Derived near={near:.4f}, far={far:.4f} from projection matrix")
-
-    depth_meters = opengl_depth_to_linear_meters(depth_raw, near, far)
-    print(f"Linear depth range: [{depth_meters.min():.4f}, {depth_meters.max():.4f}] meters")
-
+        depth_meters = opengl_depth_to_linear_meters(depth_raw, near, far)
+        print(f"Linear depth range: [{depth_meters.min():.4f}, {depth_meters.max():.4f}] meters")
+    else:
+        depth_meters = depth_raw
+        
     # Extract intrinsics from projection matrix
     fx, fy, cx, cy = extract_intrinsics_from_projection(projection_matrix, image_width, image_height)
     print(f"Intrinsics: fx={fx:.2f}, fy={fy:.2f}, cx={cx:.2f}, cy={cy:.2f}")
