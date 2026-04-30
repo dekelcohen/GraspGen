@@ -20,8 +20,19 @@ Key design decisions:
        1. Raw OpenGL [0,1] depth buffer values (ndc_z = 2*depth - 1)
        2. PyBullet/OpenGL camera convention (Z+ backward, Y+ up) vs the vision
           convention assumed by depth2points (Z+ forward, Y+ down)
+   - Depth gap detection: isolates the front-most graspable feature (e.g. door handle)
+     by finding the first depth gap >5cm in the object mask, discarding the larger
+     background surface.  This keeps the point cloud at ~0.1m extent, matching
+     GraspGen's training scale (PTv3 1cm grid, PN++ 2cm ball queries).
    - Produces object point cloud in world frame; grasps are visualized in centered
-     world frame and saved in full world frame to grasp_poses_world_frame.npy
+     world frame and saved in full world frame.
+
+Output:
+   <data_dir>/outputs/grasps.npz  — contains:
+       poses  : (N, 4, 4) float32  homogeneous transform matrices in world frame
+                  [:, :3, :3] = rotation,  [:, :3, 3] = position (metres)
+       scores : (N,)        float32  confidence scores in [0, 1], higher = better
+                  array is sorted descending by score (index 0 = best grasp)
 """
 import argparse
 import glob
@@ -231,20 +242,27 @@ if __name__ == "__main__":
                 linewidth=0.6,
             )
 
-        # Grasps are in centered world frame; undo centering to get full world frame
+        # Grasps are in centered world frame; undo centering to get full world frame.
+        # Sort by score descending so index 0 = best grasp.
         T_add_mean = tra.translation_matrix(pc_mean)
         grasps_world = np.array([T_add_mean @ g for g in grasps_inferred])
-        print(f"\nWorld-frame grasp poses ({len(grasps_world)} grasps):")
+        sort_idx = np.argsort(grasp_conf_inferred)[::-1]
+        grasps_world = grasps_world[sort_idx]
+        scores_sorted = grasp_conf_inferred[sort_idx]
+
+        print(f"\nWorld-frame grasp poses ({len(grasps_world)} grasps, sorted by score desc):")
         for i, g in enumerate(grasps_world[:5]):
             pos = g[:3, 3]
-            print(f"  Grasp {i}: position=({pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f})")
+            print(f"  Grasp {i}: score={scores_sorted[i]:.3f}  position=({pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f})")
         if len(grasps_world) > 5:
             print(f"  ... and {len(grasps_world) - 5} more")
 
-        # Save world-frame grasps
-        output_path = os.path.join(args.data_dir, "grasp_poses_world_frame.npy")
-        np.save(output_path, grasps_world)
-        print(f"Saved world-frame grasps to: {output_path}")
+        # Save to <data_dir>/outputs/grasps.npz
+        output_dir = os.path.join(args.data_dir, "outputs")
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, "grasps.npz")
+        np.savez(output_path, poses=grasps_world.astype(np.float32), scores=scores_sorted.astype(np.float32))
+        print(f"Saved grasps to: {output_path}  (load with np.load(path)['poses'], ['scores'])")
     else:
         print("No grasps found from inference!")
 
