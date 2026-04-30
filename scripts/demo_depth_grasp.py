@@ -15,10 +15,13 @@ python scripts/demo_depth_grasp.py --data_dir ./data/open_door_pybullet --grippe
 Coding Agent change log : update here changes
 Key design decisions:
 
-   - Uses depth_and_segmentation_to_point_clouds (which wraps depth2points) — requires linearizing the OpenGL depth buffer first
-   - Near/far are derived from the projection matrix (0.01 / 100)
-   - Intrinsics extracted from projection matrix: fx=fy≈221.7, cx=cy=128
-   - Grasps are visualized in centered camera frame (same as demo_object_pc.py), plus saved in world frame to grasp_poses_world_frame.npy
+   - Uses depth_and_segmentation_to_world_point_clouds (vectorised inv(VP) unprojection)
+     instead of depth2points, to correctly handle:
+       1. Raw OpenGL [0,1] depth buffer values (ndc_z = 2*depth - 1)
+       2. PyBullet/OpenGL camera convention (Z+ backward, Y+ up) vs the vision
+          convention assumed by depth2points (Z+ forward, Y+ down)
+   - Produces object point cloud in world frame; grasps are visualized in centered
+     world frame and saved in full world frame to grasp_poses_world_frame.npy
 """
 import argparse
 import glob
@@ -36,7 +39,7 @@ from grasp_gen.utils.viser_utils import (
     visualize_pointcloud,
 )
 from grasp_gen.utils.point_cloud_utils import (
-    depth_and_segmentation_to_point_clouds,
+    depth_and_segmentation_to_world_point_clouds,
     point_cloud_outlier_removal,
 )
 
@@ -128,68 +131,8 @@ def load_data(data_dir):
     return depth_raw, seg_mask, rgb_image, view_matrix, projection_matrix
 
 
-def derive_near_far_from_projection(projection_matrix):
-    """Derive near and far clip planes from OpenGL projection matrix.
-
-    For a symmetric perspective projection:
-        P[2][2] = -(f+n)/(f-n)
-        P[2][3] = -2*f*n/(f-n)
-    """
-    A = projection_matrix[2, 2]  # -(f+n)/(f-n)
-    B = projection_matrix[2, 3]  # -2*f*n/(f-n)
-
-    # near = B / (A - 1), far = B / (A + 1)
-    near = B / (A - 1.0)
-    far = B / (A + 1.0)
-    return abs(near), abs(far)
-
-
-def opengl_depth_to_linear_meters(depth_buffer, near, far):
-    """Convert raw OpenGL depth buffer [0,1] to linear depth in meters."""
-    z = depth_buffer
-    linear_depth = (2.0 * near * far) / (far + near - (2.0 * z - 1.0) * (far - near))
-    return linear_depth
-
-
-def extract_intrinsics_from_projection(projection_matrix, image_width, image_height):
-    """Extract fx, fy, cx, cy from OpenGL projection matrix.
-
-    For symmetric frustum:
-        P[0][0] = 2*n / (right - left) = 2*fx / width
-        P[1][1] = 2*n / (top - bottom) = 2*fy / height
-        cx = width / 2  (symmetric)
-        cy = height / 2  (symmetric)
-    """
-    fx = projection_matrix[0, 0] * image_width / 2.0
-    fy = projection_matrix[1, 1] * image_height / 2.0
-    cx = image_width / 2.0
-    cy = image_height / 2.0
-    return fx, fy, cx, cy
-
-
-def grasps_to_world_frame(grasps_centered, pc_mean, view_matrix):
-    """Transform grasp poses from centered-camera-frame to world frame.
-
-    grasps_centered are in camera frame with pc_mean subtracted.
-    To get world frame: inv(view_matrix) @ T_add_mean @ grasp
-    """
-    # Undo centering
-    T_add_mean = tra.translation_matrix(pc_mean)
-    # Camera-to-world transform
-    cam_to_world = np.linalg.inv(view_matrix)
-
-    world_grasps = []
-    for g in grasps_centered:
-        grasp_cam = T_add_mean @ g
-        grasp_world = cam_to_world @ grasp_cam
-        world_grasps.append(grasp_world)
-    return np.array(world_grasps)
-
-
 if __name__ == "__main__":
     args = parse_args()
-    
-    CONVERT_TO_METER_DEPTH = False
 
     if not os.path.exists(args.gripper_config):
         raise ValueError(f"Gripper config {args.gripper_config} does not exist")
@@ -200,33 +143,26 @@ if __name__ == "__main__":
     # Load data
     depth_raw, seg_mask, rgb_image, view_matrix, projection_matrix = load_data(args.data_dir)
     image_height, image_width = depth_raw.shape[:2]
-    
-    if CONVERT_TO_METER_DEPTH:
-        # Derive near/far from projection matrix and convert depth to meters
-        near, far = derive_near_far_from_projection(projection_matrix)
-        print(f"Derived near={near:.4f}, far={far:.4f} from projection matrix")
 
-        depth_meters = opengl_depth_to_linear_meters(depth_raw, near, far)
-        print(f"Linear depth range: [{depth_meters.min():.4f}, {depth_meters.max():.4f}] meters")
-    else:
-        depth_meters = depth_raw
-        
-    # Extract intrinsics from projection matrix
-    fx, fy, cx, cy = extract_intrinsics_from_projection(projection_matrix, image_width, image_height)
-    print(f"Intrinsics: fx={fx:.2f}, fy={fy:.2f}, cx={cx:.2f}, cy={cy:.2f}")
+    if view_matrix is None or projection_matrix is None:
+        raise ValueError(
+            "view_matrix and projection_matrix are required for correct world-frame unprojection. "
+            "Ensure *_view_matrix.npy and *_projection_matrix.npy are present in data_dir."
+        )
 
-    # Generate point cloud from depth + segmentation
-    scene_pc, object_pc, scene_colors, object_colors = depth_and_segmentation_to_point_clouds(
-        depth_image=depth_meters,
+    # Unproject depth + segmentation to world-frame point clouds using inv(VP).
+    # This correctly handles raw OpenGL [0,1] depth buffer values and the
+    # PyBullet/OpenGL camera convention (Z+ backward, Y+ up), avoiding the
+    # axis mismatch that depth2points has with PyBullet view matrices.
+    scene_pc, object_pc, scene_colors, object_colors = depth_and_segmentation_to_world_point_clouds(
+        depth_raw=depth_raw,
         segmentation_mask=seg_mask,
-        fx=fx,
-        fy=fy,
-        cx=cx,
-        cy=cy,
+        view_matrix=view_matrix,
+        projection_matrix=projection_matrix,
         rgb_image=rgb_image,
         target_object_id=1,
     )
-    print(f"Object point cloud: {len(object_pc)} points")
+    print(f"Object point cloud: {len(object_pc)} points (world frame)")
 
     # Load grasp config and initialize sampler
     grasp_cfg = load_grasp_cfg(args.gripper_config)
@@ -281,20 +217,20 @@ if __name__ == "__main__":
                 linewidth=0.6,
             )
 
-        # Transform grasps to world frame
-        if view_matrix is not None:
-            grasps_world = grasps_to_world_frame(grasps_inferred, pc_mean, view_matrix)
-            print(f"\nWorld-frame grasp poses ({len(grasps_world)} grasps):")
-            for i, g in enumerate(grasps_world[:5]):
-                pos = g[:3, 3]
-                print(f"  Grasp {i}: position=({pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f})")
-            if len(grasps_world) > 5:
-                print(f"  ... and {len(grasps_world) - 5} more")
+        # Grasps are in centered world frame; undo centering to get full world frame
+        T_add_mean = tra.translation_matrix(pc_mean)
+        grasps_world = np.array([T_add_mean @ g for g in grasps_inferred])
+        print(f"\nWorld-frame grasp poses ({len(grasps_world)} grasps):")
+        for i, g in enumerate(grasps_world[:5]):
+            pos = g[:3, 3]
+            print(f"  Grasp {i}: position=({pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f})")
+        if len(grasps_world) > 5:
+            print(f"  ... and {len(grasps_world) - 5} more")
 
-            # Save world-frame grasps
-            output_path = os.path.join(args.data_dir, "grasp_poses_world_frame.npy")
-            np.save(output_path, grasps_world)
-            print(f"Saved world-frame grasps to: {output_path}")
+        # Save world-frame grasps
+        output_path = os.path.join(args.data_dir, "grasp_poses_world_frame.npy")
+        np.save(output_path, grasps_world)
+        print(f"Saved world-frame grasps to: {output_path}")
     else:
         print("No grasps found from inference!")
 
